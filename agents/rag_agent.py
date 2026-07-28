@@ -1,61 +1,75 @@
 import os
 from groq import Groq
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-vectorstore = None
-retriever = None
+# store chunks in memory instead of chromadb
+document_chunks = []
 
 
 def build_rag_pipeline(filing_text: str, company: str) -> bool:
-    """Build RAG pipeline from filing text"""
-    global vectorstore, retriever
+    """Split filing into chunks and store in memory"""
+    global document_chunks
 
     print(f"📄 Building RAG pipeline for {company}...")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
+    # simple chunking — split by paragraphs
+    chunks = []
+    paragraphs = filing_text.split("\n\n")
 
-    doc = Document(
-        page_content=filing_text,
-        metadata={"company": company, "source": "SEC 10-K"}
-    )
-    chunks = splitter.split_documents([doc])
+    current_chunk = ""
+    for para in paragraphs:
+        if len(current_chunk) + len(para) < 1000:
+            current_chunk += para + "\n\n"
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = para + "\n\n"
 
-    try:
-        import chromadb
-        client = chromadb.Client()
-        client.delete_collection("finsight")
-    except:
-        pass
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
 
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        collection_name="finsight"
-    )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-    print(f"✅ RAG pipeline ready — {len(chunks)} chunks indexed!")
+    document_chunks = chunks
+    print(f"✅ RAG pipeline ready — {len(chunks)} chunks stored!")
     return True
 
 
+def simple_search(question: str, top_k: int = 3) -> list[str]:
+    """
+    Simple keyword-based search over chunks
+    No embeddings needed — works within memory limits
+    """
+    if not document_chunks:
+        return []
+
+    question_words = set(question.lower().split())
+
+    # score each chunk by keyword overlap
+    scored = []
+    for chunk in document_chunks:
+        chunk_words = set(chunk.lower().split())
+        overlap = len(question_words & chunk_words)
+        scored.append((overlap, chunk))
+
+    # return top k chunks by overlap score
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [chunk for score, chunk in scored[:top_k] if score > 0]
+
+
 def rag_agent(question: str, company: str) -> str:
-    """Answer a question using the RAG pipeline"""
-    if retriever is None:
+    """Answer a question using keyword search + LLM"""
+    if not document_chunks:
         return "RAG pipeline not initialized — filing not loaded."
 
     print(f"🔍 RAG Agent searching for: {question}")
 
-    docs = retriever.invoke(question)
-    context = "\n\n".join(doc.page_content for doc in docs)
+    # retrieve relevant chunks
+    relevant_chunks = simple_search(question, top_k=3)
+
+    if not relevant_chunks:
+        return "Not found in filing."
+
+    context = "\n\n".join(relevant_chunks)
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
