@@ -26,7 +26,7 @@ def news_agent(company: str) -> str:
         news_text += f"Content: {article.get('content', '')[:300]}\n"
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         temperature=0.1,
         messages=[
             {
